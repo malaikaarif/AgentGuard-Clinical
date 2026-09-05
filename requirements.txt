@@ -1,8 +1,7 @@
 fastapi
 uvicorn
 langgraph
-torch
-torchvision
+tensorflow
 numpy
 scikit-learn
 pillow
