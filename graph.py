@@ -1,14 +1,12 @@
 """
 AgentGuard-Clinical — agent chain, built incrementally.
 
-Phase 3, step 2: three nodes now —
-intake -> classifier -> reasoning
+Phase 3, step 4 (complete chain):
+intake -> classifier -> reasoning -> explainability
 
-The reasoning agent takes the classifier's output and asks an LLM
-(Gemini) to produce a differential diagnosis justification. This is
-the piece that gets checked against Grad-CAM in the explainability
-node later (phase 3, step 3) — so keep its output structured enough
-to reference specific evidence, not just a vague paragraph.
+All four agents now run end-to-end on one image. The next phase
+(not yet built here) is the audit layer: comparing reasoning_text's
+claimed region against where the Grad-CAM heatmap actually activated.
 """
 
 import os
@@ -17,8 +15,9 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from langgraph.graph import StateGraph, END
 from model.classifier_agent import classify_image
+from model.explainability_agent import generate_explainability
 
-load_dotenv()  # reads GEMINI_API_KEY from .env
+load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
@@ -28,10 +27,6 @@ if not GEMINI_API_KEY:
     )
 
 genai.configure(api_key=GEMINI_API_KEY)
-
-# If this model name errors out as unavailable, run this in a Python shell
-# to see what's currently available to your key, then swap the name below:
-#   import google.generativeai as genai; [print(m.name) for m in genai.list_models()]
 GEMINI_MODEL_NAME = "gemini-3.6-flash"
 
 
@@ -43,6 +38,7 @@ class PipelineState(TypedDict):
     logits: Optional[list]
     class_names: Optional[list]
     reasoning_text: Optional[str]
+    heatmap_path: Optional[str]
     error: Optional[str]
 
 
@@ -74,12 +70,6 @@ def classifier_node(state: PipelineState) -> PipelineState:
 
 # ---- Node 3: reasoning ----
 def reasoning_node(state: PipelineState) -> PipelineState:
-    """
-    Takes the classifier's diagnosis + full probability distribution
-    and asks Gemini to write a short differential diagnosis justification.
-    Explicitly asked to reference visual features, so the explainability
-    node can later check this claim against the actual Grad-CAM region.
-    """
     if state.get("error"):
         return state
 
@@ -112,6 +102,26 @@ uncertainty explicitly rather than overstating certainty."""
     return {**state, "reasoning_text": reasoning_text}
 
 
+# ---- Node 4: explainability ----
+def explainability_node(state: PipelineState) -> PipelineState:
+    """
+    Runs Grad-CAM on the same image and saves the heatmap overlay.
+    Doesn't yet compare it against reasoning_text's claims — that's
+    the audit layer, built as a separate next step.
+    """
+    if state.get("error"):
+        return state
+
+    try:
+        result = generate_explainability(state["image_path"])
+    except Exception as e:
+        return {**state, "error": f"Explainability agent failed: {str(e)}"}
+
+    print(f"[explainability] Saved heatmap to: {result['heatmap_path']}")
+
+    return {**state, "heatmap_path": result["heatmap_path"]}
+
+
 # ---- Build the graph ----
 def build_graph():
     graph = StateGraph(PipelineState)
@@ -119,11 +129,13 @@ def build_graph():
     graph.add_node("intake", intake_node)
     graph.add_node("classifier", classifier_node)
     graph.add_node("reasoning", reasoning_node)
+    graph.add_node("explainability", explainability_node)
 
     graph.set_entry_point("intake")
     graph.add_edge("intake", "classifier")
     graph.add_edge("classifier", "reasoning")
-    graph.add_edge("reasoning", END)
+    graph.add_edge("reasoning", "explainability")
+    graph.add_edge("explainability", END)
 
     return graph.compile()
 
@@ -142,6 +154,7 @@ if __name__ == "__main__":
         "logits": None,
         "class_names": None,
         "reasoning_text": None,
+        "heatmap_path": None,
         "error": None,
     }
 
