@@ -1,12 +1,13 @@
 """
-AgentGuard-Clinical — agent chain, built incrementally.
+AgentGuard-Clinical — full agent chain.
 
-Phase 3, step 4 (complete chain):
-intake -> classifier -> reasoning -> explainability
+intake -> classifier -> reasoning -> explainability -> audit
 
-All four agents now run end-to-end on one image. The next phase
-(not yet built here) is the audit layer: comparing reasoning_text's
-claimed region against where the Grad-CAM heatmap actually activated.
+The audit node is the project's core novel piece: it checks whether
+the reasoning agent's claimed anatomical region is consistent with
+where the Grad-CAM heatmap actually activated. Honest scope note is
+in audit_agent.py — this is a first-attempt heuristic, not a solved
+problem.
 """
 
 import os
@@ -16,6 +17,7 @@ import google.generativeai as genai
 from langgraph.graph import StateGraph, END
 from model.classifier_agent import classify_image
 from model.explainability_agent import generate_explainability
+from model.audit_agent import describe_heatmap_location, check_consistency
 
 load_dotenv()
 
@@ -39,6 +41,10 @@ class PipelineState(TypedDict):
     class_names: Optional[list]
     reasoning_text: Optional[str]
     heatmap_path: Optional[str]
+    heatmap_array: Optional[object]  # not JSON-serializable, kept internal only
+    region_label: Optional[str]
+    audit_verdict: Optional[str]
+    audit_explanation: Optional[str]
     error: Optional[str]
 
 
@@ -104,11 +110,6 @@ uncertainty explicitly rather than overstating certainty."""
 
 # ---- Node 4: explainability ----
 def explainability_node(state: PipelineState) -> PipelineState:
-    """
-    Runs Grad-CAM on the same image and saves the heatmap overlay.
-    Doesn't yet compare it against reasoning_text's claims — that's
-    the audit layer, built as a separate next step.
-    """
     if state.get("error"):
         return state
 
@@ -119,7 +120,38 @@ def explainability_node(state: PipelineState) -> PipelineState:
 
     print(f"[explainability] Saved heatmap to: {result['heatmap_path']}")
 
-    return {**state, "heatmap_path": result["heatmap_path"]}
+    return {
+        **state,
+        "heatmap_path": result["heatmap_path"],
+        "heatmap_array": result["heatmap_array"],
+    }
+
+
+# ---- Node 5: audit ----
+def audit_node(state: PipelineState) -> PipelineState:
+    """
+    Compares the reasoning agent's claimed region against where the
+    Grad-CAM heatmap actually activated. This is the project's core
+    novel check — see audit_agent.py for the honest scope note.
+    """
+    if state.get("error"):
+        return state
+
+    try:
+        location_info = describe_heatmap_location(state["heatmap_array"])
+        result = check_consistency(state["reasoning_text"], location_info)
+    except Exception as e:
+        return {**state, "error": f"Audit agent failed: {str(e)}"}
+
+    print(f"[audit] Region: {location_info['region_label']}")
+    print(f"[audit] Verdict: {result['verdict'].upper()} — {result['explanation']}\n")
+
+    return {
+        **state,
+        "region_label": location_info["region_label"],
+        "audit_verdict": result["verdict"],
+        "audit_explanation": result["explanation"],
+    }
 
 
 # ---- Build the graph ----
@@ -130,12 +162,14 @@ def build_graph():
     graph.add_node("classifier", classifier_node)
     graph.add_node("reasoning", reasoning_node)
     graph.add_node("explainability", explainability_node)
+    graph.add_node("audit", audit_node)
 
     graph.set_entry_point("intake")
     graph.add_edge("intake", "classifier")
     graph.add_edge("classifier", "reasoning")
     graph.add_edge("reasoning", "explainability")
-    graph.add_edge("explainability", END)
+    graph.add_edge("explainability", "audit")
+    graph.add_edge("audit", END)
 
     return graph.compile()
 
@@ -155,9 +189,16 @@ if __name__ == "__main__":
         "class_names": None,
         "reasoning_text": None,
         "heatmap_path": None,
+        "heatmap_array": None,
+        "region_label": None,
+        "audit_verdict": None,
+        "audit_explanation": None,
         "error": None,
     }
 
     final_state = app.invoke(initial_state)
+
+    # Drop the raw numpy array before printing — not readable/useful in a log
+    printable_state = {k: v for k, v in final_state.items() if k != "heatmap_array"}
     print("\n=== FINAL STATE ===")
-    print(final_state)
+    print(printable_state)
