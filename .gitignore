@@ -7,3 +7,4 @@ __pycache__/
 explainability_output/
 test_images/
 batch_results.csv
+ uploaded_images/
