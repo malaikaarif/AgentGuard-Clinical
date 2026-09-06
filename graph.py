@@ -45,6 +45,8 @@ class PipelineState(TypedDict):
     region_label: Optional[str]
     audit_verdict: Optional[str]
     audit_explanation: Optional[str]
+    needs_human_review: Optional[bool]
+    review_reason: Optional[str]
     error: Optional[str]
 
 
@@ -154,6 +156,48 @@ def audit_node(state: PipelineState) -> PipelineState:
     }
 
 
+# ---- Node 6: escalation ----
+def escalation_node(state: PipelineState) -> PipelineState:
+    """
+    Real deployment pattern: don't hand a clinician a confident-looking
+    diagnosis when the audit layer flagged a problem. Route inconsistent
+    or uncertain cases to human review instead of silently passing them
+    through as if everything checked out.
+    """
+    if state.get("error"):
+        return state
+
+    verdict = state.get("audit_verdict")
+    confidence = state.get("confidence", 1.0)
+
+    needs_review = False
+    reasons = []
+
+    if verdict == "inconsistent":
+        needs_review = True
+        reasons.append("reasoning/heatmap mismatch flagged by audit layer")
+    elif verdict == "uncertain":
+        needs_review = True
+        reasons.append("audit layer could not confidently judge consistency")
+
+    if confidence is not None and confidence < 0.90:
+        needs_review = True
+        reasons.append(f"classifier confidence below threshold ({confidence:.2%})")
+
+    review_reason = "; ".join(reasons) if reasons else None
+
+    if needs_review:
+        print(f"[escalation] FLAGGED FOR HUMAN REVIEW — {review_reason}\n")
+    else:
+        print("[escalation] No review needed — passed all checks.\n")
+
+    return {
+        **state,
+        "needs_human_review": needs_review,
+        "review_reason": review_reason,
+    }
+
+
 # ---- Build the graph ----
 def build_graph():
     graph = StateGraph(PipelineState)
@@ -163,13 +207,15 @@ def build_graph():
     graph.add_node("reasoning", reasoning_node)
     graph.add_node("explainability", explainability_node)
     graph.add_node("audit", audit_node)
+    graph.add_node("escalation", escalation_node)
 
     graph.set_entry_point("intake")
     graph.add_edge("intake", "classifier")
     graph.add_edge("classifier", "reasoning")
     graph.add_edge("reasoning", "explainability")
     graph.add_edge("explainability", "audit")
-    graph.add_edge("audit", END)
+    graph.add_edge("audit", "escalation")
+    graph.add_edge("escalation", END)
 
     return graph.compile()
 
@@ -193,6 +239,8 @@ if __name__ == "__main__":
         "region_label": None,
         "audit_verdict": None,
         "audit_explanation": None,
+        "needs_human_review": None,
+        "review_reason": None,
         "error": None,
     }
 
