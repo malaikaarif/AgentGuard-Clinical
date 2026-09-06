@@ -16,11 +16,19 @@ import os
 import numpy as np
 import google.generativeai as genai
 from dotenv import load_dotenv
+from model.arw import retry_with_backoff
 
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 GEMINI_MODEL_NAME = "gemini-3.6-flash"
+
+
+@retry_with_backoff(max_retries=3, base_delay=12)
+def _call_gemini_audit(prompt: str) -> str:
+    model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+    response = model.generate_content(prompt)
+    return response.text.strip()
 
 
 def describe_heatmap_location(heatmap: np.ndarray) -> dict:
@@ -103,9 +111,7 @@ VERDICT: <consistent|inconsistent|uncertain>
 EXPLANATION: <one or two sentences>"""
 
     try:
-        model = genai.GenerativeModel(GEMINI_MODEL_NAME)
-        response = model.generate_content(prompt)
-        text = response.text.strip()
+        text = _call_gemini_audit(prompt)
 
         verdict = "uncertain"
         explanation = text
@@ -117,7 +123,7 @@ EXPLANATION: <one or two sentences>"""
 
         return {"verdict": verdict, "explanation": explanation}
     except Exception as e:
-        return {"verdict": "uncertain", "explanation": f"Audit check failed: {str(e)}"}
+        return {"verdict": "uncertain", "explanation": f"Audit check failed after retries: {str(e)}"}
 
 
 if __name__ == "__main__":

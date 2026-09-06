@@ -5,3 +5,5 @@ model/*.keras
 __pycache__/
 *.pyc
 explainability_output/
+test_images/
+batch_results.csv

@@ -3,11 +3,10 @@ AgentGuard-Clinical — full agent chain.
 
 intake -> classifier -> reasoning -> explainability -> audit
 
-The audit node is the project's core novel piece: it checks whether
-the reasoning agent's claimed anatomical region is consistent with
-where the Grad-CAM heatmap actually activated. Honest scope note is
-in audit_agent.py — this is a first-attempt heuristic, not a solved
-problem.
+Phase 4: reasoning agent's Gemini call is now wrapped with ARW's
+retry-with-backoff, so a transient failure (e.g. a 429 rate limit,
+which happened during real testing) gets retried instead of crashing
+the whole pipeline.
 """
 
 import os
@@ -18,6 +17,7 @@ from langgraph.graph import StateGraph, END
 from model.classifier_agent import classify_image
 from model.explainability_agent import generate_explainability
 from model.audit_agent import describe_heatmap_location, check_consistency
+from model.arw import retry_with_backoff
 
 load_dotenv()
 
@@ -41,7 +41,7 @@ class PipelineState(TypedDict):
     class_names: Optional[list]
     reasoning_text: Optional[str]
     heatmap_path: Optional[str]
-    heatmap_array: Optional[object]  # not JSON-serializable, kept internal only
+    heatmap_array: Optional[object]
     region_label: Optional[str]
     audit_verdict: Optional[str]
     audit_explanation: Optional[str]
@@ -74,7 +74,14 @@ def classifier_node(state: PipelineState) -> PipelineState:
     }
 
 
-# ---- Node 3: reasoning ----
+# ---- Node 3: reasoning (now ARW-wrapped) ----
+@retry_with_backoff(max_retries=3, base_delay=12)
+def _call_gemini_reasoning(prompt: str) -> str:
+    model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
+
 def reasoning_node(state: PipelineState) -> PipelineState:
     if state.get("error"):
         return state
@@ -97,11 +104,9 @@ Be direct and clinical in tone. If confidence is not high, note that
 uncertainty explicitly rather than overstating certainty."""
 
     try:
-        model = genai.GenerativeModel(GEMINI_MODEL_NAME)
-        response = model.generate_content(prompt)
-        reasoning_text = response.text.strip()
+        reasoning_text = _call_gemini_reasoning(prompt)
     except Exception as e:
-        return {**state, "error": f"Reasoning agent failed: {str(e)}"}
+        return {**state, "error": f"Reasoning agent failed after retries: {str(e)}"}
 
     print(f"[reasoning] {reasoning_text}\n")
 
@@ -127,13 +132,8 @@ def explainability_node(state: PipelineState) -> PipelineState:
     }
 
 
-# ---- Node 5: audit ----
+# ---- Node 5: audit (uses ARW-wrapped check_consistency internally) ----
 def audit_node(state: PipelineState) -> PipelineState:
-    """
-    Compares the reasoning agent's claimed region against where the
-    Grad-CAM heatmap actually activated. This is the project's core
-    novel check — see audit_agent.py for the honest scope note.
-    """
     if state.get("error"):
         return state
 
@@ -141,7 +141,7 @@ def audit_node(state: PipelineState) -> PipelineState:
         location_info = describe_heatmap_location(state["heatmap_array"])
         result = check_consistency(state["reasoning_text"], location_info)
     except Exception as e:
-        return {**state, "error": f"Audit agent failed: {str(e)}"}
+        return {**state, "error": f"Audit agent failed after retries: {str(e)}"}
 
     print(f"[audit] Region: {location_info['region_label']}")
     print(f"[audit] Verdict: {result['verdict'].upper()} — {result['explanation']}\n")
@@ -198,7 +198,6 @@ if __name__ == "__main__":
 
     final_state = app.invoke(initial_state)
 
-    # Drop the raw numpy array before printing — not readable/useful in a log
     printable_state = {k: v for k, v in final_state.items() if k != "heatmap_array"}
     print("\n=== FINAL STATE ===")
     print(printable_state)
