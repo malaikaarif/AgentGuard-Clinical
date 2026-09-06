@@ -9,15 +9,23 @@ committed.
 """
 import os
 import pytest
-from model.classifier_agent import classify_image, CLASS_NAMES
+from model.classifier_agent import classify_image, CLASS_NAMES, MODEL_PATH
 
 FIXTURE_IMAGE = os.path.join(os.path.dirname(__file__), "fixtures", "sample_pituitary.jpg")
 
+# Model weights are gitignored (too large to commit) — on CI (GitHub
+# Actions), this file won't exist. Skip cleanly rather than failing,
+# since that's an environment gap, not a code bug.
+_missing = []
+if not os.path.exists(FIXTURE_IMAGE):
+    _missing.append("fixture image")
+if not os.path.exists(MODEL_PATH):
+    _missing.append("model weights file")
 
-@pytest.mark.skipif(
-    not os.path.exists(FIXTURE_IMAGE),
-    reason="Fixture image not found — add tests/fixtures/sample_pituitary.jpg to run this test"
-)
+SKIP_REASON = f"Missing: {', '.join(_missing)} — these aren't committed to git (too large), so this test only runs locally, not on CI." if _missing else ""
+
+
+@pytest.mark.skipif(bool(_missing), reason=SKIP_REASON)
 def test_classify_image_returns_expected_keys():
     result = classify_image(FIXTURE_IMAGE)
 
@@ -28,10 +36,7 @@ def test_classify_image_returns_expected_keys():
     assert result["class_names"] == CLASS_NAMES
 
 
-@pytest.mark.skipif(
-    not os.path.exists(FIXTURE_IMAGE),
-    reason="Fixture image not found — add tests/fixtures/sample_pituitary.jpg to run this test"
-)
+@pytest.mark.skipif(bool(_missing), reason=SKIP_REASON)
 def test_logits_are_valid_probabilities():
     result = classify_image(FIXTURE_IMAGE)
 
