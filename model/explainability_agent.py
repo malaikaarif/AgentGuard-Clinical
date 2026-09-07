@@ -13,7 +13,7 @@ step, not yet done here — this module just produces the heatmap.
 import os
 import numpy as np
 import tensorflow as tf
-import matplotlib.cm as cm
+import matplotlib
 from tensorflow.keras.models import load_model
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 from tensorflow.keras.preprocessing.image import load_img, img_to_array, array_to_img
@@ -64,7 +64,7 @@ def _overlay_heatmap(img_path: str, heatmap: np.ndarray, alpha: float = 0.4):
     img = img_to_array(img)
 
     heatmap_resized = np.uint8(255 * heatmap)
-    jet = cm.get_cmap("jet")
+    jet = matplotlib.colormaps["jet"]  # modern replacement for the removed cm.get_cmap()
     jet_colors = jet(np.arange(256))[:, :3]
     jet_heatmap = jet_colors[heatmap_resized]
     jet_heatmap = array_to_img(jet_heatmap)
