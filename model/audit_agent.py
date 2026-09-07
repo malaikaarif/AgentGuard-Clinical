@@ -31,6 +31,29 @@ def _call_gemini_audit(prompt: str) -> str:
     return response.text.strip()
 
 
+def compute_activation_concentration(heatmap: np.ndarray) -> dict:
+    """
+    Measures whether the heatmap's activation is concentrated in a
+    focal hotspot, or diffuse/spread across the whole image.
+
+    Uses coefficient of variation (std/mean) as a simple concentration
+    score: a few very active cells among mostly-quiet ones gives a high
+    score (focal/concentrated); near-uniform activation everywhere gives
+    a low score (diffuse). Threshold of 1.0 is a heuristic, not a
+    calibrated statistical cutoff — chosen from inspecting the notumor
+    cases that motivated this function, not derived from a larger study.
+    """
+    mean = float(heatmap.mean())
+    std = float(heatmap.std())
+    concentration_score = std / (mean + 1e-8)
+    is_diffuse = concentration_score < 1.0
+
+    return {
+        "concentration_score": concentration_score,
+        "is_diffuse": is_diffuse,
+    }
+
+
 def describe_heatmap_location(heatmap: np.ndarray) -> dict:
     """
     Takes the raw (low-resolution, e.g. 7x7) Grad-CAM heatmap and
@@ -80,10 +103,19 @@ def describe_heatmap_location(heatmap: np.ndarray) -> dict:
     }
 
 
-def check_consistency(reasoning_text: str, location_info: dict) -> dict:
+def check_consistency(reasoning_text: str, location_info: dict, diagnosis: str = None, heatmap: np.ndarray = None) -> dict:
     """
     Asks Gemini to judge whether the reasoning agent's claimed region
     is plausibly consistent with the measured heatmap location.
+
+    For 'notumor' diagnoses, uses a different check: since there's no
+    lesion to localize, the expectation flips — we check whether the
+    heatmap shows diffuse/low-concentration activation (expected for a
+    negative finding) rather than comparing to a specific claimed
+    region. This addresses a real pattern found during testing: both
+    notumor cases in an early batch were flagged inconsistent for a
+    structural reason (no lesion = no valid comparison target), not
+    because anything was actually wrong.
 
     Returns:
         {
@@ -91,7 +123,30 @@ def check_consistency(reasoning_text: str, location_info: dict) -> dict:
             "explanation": str,   # one or two sentence justification
         }
     """
-    prompt = f"""You are auditing an AI diagnostic pipeline for consistency.
+    if diagnosis == "notumor" and heatmap is not None:
+        concentration = compute_activation_concentration(heatmap)
+        prompt = f"""You are auditing an AI diagnostic pipeline for consistency.
+
+The classifier predicted NO TUMOR (notumor) for this brain MRI. The
+reasoning agent wrote this justification:
+"{reasoning_text}"
+
+Since there is no lesion to localize in a true negative case, the
+EXPECTED pattern is diffuse or low-concentration heatmap activation,
+NOT a focal hotspot on a specific anatomical region. Independently,
+the heatmap's activation concentration score is {concentration['concentration_score']:.2f}
+({'diffuse — spread across the image' if concentration['is_diffuse'] else 'concentrated — focused on a specific hotspot'}).
+
+Judge: is this CONSISTENT (diffuse activation, matching the expectation
+for a no-lesion case), INCONSISTENT (surprisingly concentrated despite
+no lesion being predicted, which may indicate the model is attending
+to something it shouldn't be), or UNCERTAIN?
+
+Respond in exactly this format:
+VERDICT: <consistent|inconsistent|uncertain>
+EXPLANATION: <one or two sentences>"""
+    else:
+        prompt = f"""You are auditing an AI diagnostic pipeline for consistency.
 
 The reasoning agent wrote this justification for a brain MRI diagnosis:
 "{reasoning_text}"
@@ -127,7 +182,7 @@ EXPLANATION: <one or two sentences>"""
 
 
 if __name__ == "__main__":
-    # Quick standalone test with fake data
+    # Test 1: original lesion-present case
     fake_heatmap = np.zeros((7, 7))
     fake_heatmap[3, 3] = 1.0  # dead center activation
     loc = describe_heatmap_location(fake_heatmap)
@@ -136,5 +191,20 @@ if __name__ == "__main__":
     result = check_consistency(
         "The lesion appears centered within the sella turcica, a midline structure.",
         loc,
+        diagnosis="pituitary",
     )
-    print("Consistency check:", result)
+    print("Consistency check (pituitary, focal case):", result)
+
+    # Test 2: notumor case with diffuse activation (expected pattern)
+    diffuse_heatmap = np.ones((7, 7)) * 0.5  # near-uniform, low concentration
+    loc2 = describe_heatmap_location(diffuse_heatmap)
+    concentration2 = compute_activation_concentration(diffuse_heatmap)
+    print("\nConcentration info (diffuse):", concentration2)
+
+    result2 = check_consistency(
+        "The classifier predicts no evidence of intracranial tumor with high confidence.",
+        loc2,
+        diagnosis="notumor",
+        heatmap=diffuse_heatmap,
+    )
+    print("Consistency check (notumor, diffuse case):", result2)

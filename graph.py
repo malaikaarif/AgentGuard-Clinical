@@ -141,7 +141,12 @@ def audit_node(state: PipelineState) -> PipelineState:
 
     try:
         location_info = describe_heatmap_location(state["heatmap_array"])
-        result = check_consistency(state["reasoning_text"], location_info)
+        result = check_consistency(
+            state["reasoning_text"],
+            location_info,
+            diagnosis=state["diagnosis"],
+            heatmap=state["heatmap_array"],
+        )
     except Exception as e:
         return {**state, "error": f"Audit agent failed after retries: {str(e)}"}
 
