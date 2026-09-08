@@ -1,0 +1,12 @@
+services:
+  agentguard-clinical:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persist uploaded images and generated heatmaps outside the
+      # container, so they survive a rebuild instead of vanishing.
+      - ./uploaded_images:/app/uploaded_images
+      - ./explainability_output:/app/explainability_output

@@ -1,0 +1,20 @@
+# Never bake secrets into the image — passed at runtime via env_file instead
+.env
+
+# Local dev environment, not needed inside the container
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Test data, generated outputs, and uploads — not part of the app itself
+test_images/
+uploaded_images/
+explainability_output/
+batch_results.csv
+
+# Version control and CI config — irrelevant inside the container
+.git/
+.github/
+
+# tests/fixtures/ IS allowed in (small, useful if running tests inside the container)
