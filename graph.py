@@ -40,6 +40,7 @@ class PipelineState(TypedDict):
     logits: Optional[list]
     class_names: Optional[list]
     reasoning_text: Optional[str]
+    reasoning_is_fallback: Optional[bool]
     heatmap_path: Optional[str]
     heatmap_array: Optional[object]
     region_label: Optional[str]
@@ -107,12 +108,22 @@ uncertainty explicitly rather than overstating certainty."""
 
     try:
         reasoning_text = _call_gemini_reasoning(prompt)
+        print(f"[reasoning] {reasoning_text}\n")
+        return {**state, "reasoning_text": reasoning_text, "reasoning_is_fallback": False}
     except Exception as e:
-        return {**state, "error": f"Reasoning agent failed after retries: {str(e)}"}
-
-    print(f"[reasoning] {reasoning_text}\n")
-
-    return {**state, "reasoning_text": reasoning_text}
+        # ARW fallback termination guard: don't crash the whole pipeline
+        # just because the reasoning agent is unavailable. Degrade to a
+        # clear placeholder, mark it as a fallback, and let the pipeline
+        # continue — escalation will force this to human review since
+        # there's no real reasoning to trust.
+        print(f"[reasoning] FAILED after retries ({str(e)}) — falling back, forcing human review\n")
+        fallback_text = (
+            f"[AUTOMATED REASONING UNAVAILABLE] The reasoning agent failed after "
+            f"multiple retries ({str(e)}). Classifier predicted '{state['diagnosis']}' "
+            f"at {state['confidence']:.2%} confidence. No AI-generated clinical "
+            f"justification could be produced for this case — human review required."
+        )
+        return {**state, "reasoning_text": fallback_text, "reasoning_is_fallback": True}
 
 
 # ---- Node 4: explainability ----
@@ -138,6 +149,18 @@ def explainability_node(state: PipelineState) -> PipelineState:
 def audit_node(state: PipelineState) -> PipelineState:
     if state.get("error"):
         return state
+
+    # If reasoning already fell back (no real justification exists), don't
+    # waste a Gemini call auditing a placeholder — go straight to uncertain.
+    if state.get("reasoning_is_fallback"):
+        print("[audit] Skipped — reasoning agent fell back, nothing to audit\n")
+        location_info = describe_heatmap_location(state["heatmap_array"])
+        return {
+            **state,
+            "region_label": location_info["region_label"],
+            "audit_verdict": "uncertain",
+            "audit_explanation": "Audit skipped because the reasoning agent fell back to a placeholder — no real justification was available to check.",
+        }
 
     try:
         location_info = describe_heatmap_location(state["heatmap_array"])
@@ -177,6 +200,10 @@ def escalation_node(state: PipelineState) -> PipelineState:
 
     needs_review = False
     reasons = []
+
+    if state.get("reasoning_is_fallback"):
+        needs_review = True
+        reasons.append("reasoning agent was unavailable (ARW fallback triggered)")
 
     if verdict == "inconsistent":
         needs_review = True
@@ -239,6 +266,7 @@ if __name__ == "__main__":
         "logits": None,
         "class_names": None,
         "reasoning_text": None,
+        "reasoning_is_fallback": None,
         "heatmap_path": None,
         "heatmap_array": None,
         "region_label": None,

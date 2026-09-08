@@ -70,6 +70,7 @@ def run_pipeline(image_path: str) -> dict:
         "logits": None,
         "class_names": None,
         "reasoning_text": None,
+        "reasoning_is_fallback": None,
         "heatmap_path": None,
         "heatmap_array": None,
         "region_label": None,
