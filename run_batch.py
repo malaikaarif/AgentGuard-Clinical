@@ -26,14 +26,39 @@ def find_images(folder: str) -> list:
     ]
 
 
+def load_already_processed(output_csv: str) -> set:
+    """Returns the set of filenames already in the CSV, so a multi-day
+    batch run (paced by API quota) doesn't waste calls re-processing
+    images from a previous day."""
+    if not os.path.exists(output_csv):
+        return set()
+
+    processed = set()
+    with open(output_csv, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            processed.add(row["filename"])
+    return processed
+
+
 def run_batch(folder: str, output_csv: str = "batch_results.csv"):
-    images = find_images(folder)
-    if not images:
+    all_images = find_images(folder)
+    if not all_images:
         print(f"No images found in {folder}")
         return
 
+    already_processed = load_already_processed(output_csv)
+    images = [p for p in all_images if os.path.basename(p) not in already_processed]
+
+    if already_processed:
+        print(f"Skipping {len(already_processed)} already-processed images from a previous run.")
+
+    if not images:
+        print("Nothing new to process — all images in this folder are already in the CSV.")
+        return
+
     app = build_graph()
-    rows = []
+    new_rows = []
 
     for i, image_path in enumerate(images, 1):
         print(f"\n--- [{i}/{len(images)}] {os.path.basename(image_path)} ---")
@@ -45,11 +70,14 @@ def run_batch(folder: str, output_csv: str = "batch_results.csv"):
             "logits": None,
             "class_names": None,
             "reasoning_text": None,
+            "reasoning_is_fallback": None,
             "heatmap_path": None,
             "heatmap_array": None,
             "region_label": None,
             "audit_verdict": None,
             "audit_explanation": None,
+            "needs_human_review": None,
+            "review_reason": None,
             "error": None,
         }
 
@@ -57,7 +85,7 @@ def run_batch(folder: str, output_csv: str = "batch_results.csv"):
             final_state = app.invoke(initial_state)
         except Exception as e:
             print(f"FAILED: {e}")
-            rows.append({
+            new_rows.append({
                 "filename": os.path.basename(image_path),
                 "diagnosis": "ERROR",
                 "confidence": "",
@@ -66,7 +94,7 @@ def run_batch(folder: str, output_csv: str = "batch_results.csv"):
             })
             continue
 
-        rows.append({
+        new_rows.append({
             "filename": os.path.basename(image_path),
             "diagnosis": final_state.get("diagnosis"),
             "confidence": final_state.get("confidence"),
@@ -74,19 +102,26 @@ def run_batch(folder: str, output_csv: str = "batch_results.csv"):
             "error": final_state.get("error"),
         })
 
-    # Write CSV
-    with open(output_csv, "w", newline="") as f:
+    # Append new rows to the CSV (write header only if the file is new)
+    file_exists = os.path.exists(output_csv)
+    with open(output_csv, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["filename", "diagnosis", "confidence", "audit_verdict", "error"])
-        writer.writeheader()
-        writer.writerows(rows)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(new_rows)
 
-    # Print summary
-    consistent = sum(1 for r in rows if r["audit_verdict"] == "consistent")
-    inconsistent = sum(1 for r in rows if r["audit_verdict"] == "inconsistent")
-    uncertain = sum(1 for r in rows if r["audit_verdict"] == "uncertain")
-    errors = sum(1 for r in rows if r["diagnosis"] == "ERROR")
+    # Print summary — for ALL rows in the file so far, not just this run
+    all_processed = already_processed | {r["filename"] for r in new_rows}
+    with open(output_csv, "r", newline="") as f:
+        all_rows = list(csv.DictReader(f))
 
-    print(f"\n=== BATCH SUMMARY ({len(rows)} images) ===")
+    consistent = sum(1 for r in all_rows if r["audit_verdict"] == "consistent")
+    inconsistent = sum(1 for r in all_rows if r["audit_verdict"] == "inconsistent")
+    uncertain = sum(1 for r in all_rows if r["audit_verdict"] == "uncertain")
+    errors = sum(1 for r in all_rows if r["diagnosis"] == "ERROR")
+
+    print(f"\n=== THIS RUN: {len(new_rows)} new images processed ===")
+    print(f"=== CUMULATIVE TOTAL: {len(all_rows)} images across all runs ===")
     print(f"Consistent:   {consistent}")
     print(f"Inconsistent: {inconsistent}")
     print(f"Uncertain:    {uncertain}")
